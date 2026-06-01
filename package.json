@@ -1,0 +1,15 @@
+{
+  "name": "virtual-numbers-api",
+  "version": "2.0.0",
+  "description": "Dark Tech Zone – Virtual Numbers & OTP API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6",
+    "axios": "^1.6.2",
+    "cors": "^2.8.5"
+  }
+}
