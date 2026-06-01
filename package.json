@@ -1,0 +1,17 @@
+{
+  "name": "virtual-numbers-api",
+  "version": "1.0.0",
+  "description": "Dark Tech Zone – Virtual Numbers & OTP API (Railway ready)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6",
+    "axios": "^1.6.2",
+    "cors": "^2.8.5"
+  },
+  "author": "Dark Tech Zone — Advanced Security Division",
+  "license": "UNLICENSED"
+}
