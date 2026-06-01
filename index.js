@@ -6,16 +6,14 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Admin API key (change this to something strong)
+// Admin API key (change this!)
 const ADMIN_KEY = 'DarkZone2025';
 
-// Enable CORS for all origins (so any app/website can use it)
 app.use(cors());
 app.use(express.json());
 
-// ========== SQLite Database Setup ==========
+// ========== SQLite Database ==========
 const db = new sqlite3.Database('./numbers.db');
-
 db.run(`
   CREATE TABLE IF NOT EXISTS numbers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,24 +23,77 @@ db.run(`
   )
 `);
 
-// ========== PUBLIC ENDPOINTS (No API key needed) ==========
+// ========== PANEL CONFIGURATION (KONEK + ST) ==========
+const PANELS = [
+  {
+    name: 'KONEK',
+    url: 'http://51.77.216.195/crapi/konek/viewstats',
+    token: 'RFRXSjRSQmNccJFIWpN1e16XVIdYjGtlSGlphVVRUHpClnlginKV'
+  },
+  {
+    name: 'ST Panel',
+    url: 'http://147.135.212.197/crapi/st/viewstats',
+    token: 'SFBXRkFBUzSIiZZ8Y2FwSlqMb3yGkWOAi2lXW1JojFZbaFddaZRPdQ=='
+  }
+];
 
-// 1. Get list of countries with available numbers
+function extractOtp(text) {
+  if (!text) return null;
+  const m = text.match(/(?<!\d)(\d{3,4})[\s\-]?(\d{3,4})(?!\d)/);
+  if (m) return m[1] + m[2];
+  const m2 = text.match(/(?<!\d)(\d{4,8})(?!\d)/);
+  return m2 ? m2[1] : null;
+}
+
+async function fetchPanelMessages(panel, limit = 20) {
+  try {
+    const url = `${panel.url}?token=${encodeURIComponent(panel.token)}&records=${limit}`;
+    const res = await axios.get(url, { timeout: 10000 });
+    const data = res.data;
+    const messages = [];
+    if (data && data.data && Array.isArray(data.data)) {
+      for (const row of data.data) {
+        messages.push({
+          source: panel.name,
+          time: row.dt || new Date().toISOString(),
+          number: row.num || '',
+          service: row.cli || '',
+          message: row.message || '',
+          otp: extractOtp(row.message)
+        });
+      }
+    } else if (Array.isArray(data) && data.length && Array.isArray(data[0])) {
+      for (const row of data) {
+        if (row.length >= 4) {
+          messages.push({
+            source: panel.name,
+            time: row[3] || new Date().toISOString(),
+            number: row[1] || '',
+            service: row[0] || '',
+            message: row[2] || '',
+            otp: extractOtp(row[2])
+          });
+        }
+      }
+    }
+    return messages;
+  } catch (err) {
+    console.error(`Panel ${panel.name} error:`, err.message);
+    return [];
+  }
+}
+
+// ========== PUBLIC ENDPOINTS ==========
 app.get('/api/countries', (req, res) => {
   db.all("SELECT country, COUNT(*) as count FROM numbers GROUP BY country", (err, rows) => {
     if (err) return res.status(500).json({ success: false, error: err.message });
-    res.json({
-      success: true,
-      countries: rows.map(r => ({ code: r.country, count: r.count }))
-    });
+    res.json({ success: true, countries: rows.map(r => ({ code: r.country, count: r.count })) });
   });
 });
 
-// 2. Get random virtual number(s) – optional ?country=XX&limit=Y
 app.get('/api/number', (req, res) => {
   const country = req.query.country ? req.query.country.toUpperCase() : null;
   const limit = Math.min(parseInt(req.query.limit) || 1, 10);
-  
   let sql, params;
   if (country) {
     sql = "SELECT phone FROM numbers WHERE country = ? ORDER BY RANDOM() LIMIT ?";
@@ -51,67 +102,59 @@ app.get('/api/number', (req, res) => {
     sql = "SELECT phone FROM numbers ORDER BY RANDOM() LIMIT ?";
     params = [limit];
   }
-  
   db.all(sql, params, (err, rows) => {
     if (err) return res.status(500).json({ success: false, error: err.message });
     const numbers = rows.map(r => r.phone);
-    if (numbers.length === 0) {
+    if (!numbers.length) {
       return res.status(404).json({ success: false, error: 'No numbers available' + (country ? ` for ${country}` : '') });
     }
-    res.json({
-      success: true,
-      count: numbers.length,
-      numbers: numbers,
-      country: country || 'random'
-    });
+    res.json({ success: true, count: numbers.length, numbers, country: country || 'random' });
   });
 });
 
-// 3. Proxy to your existing OTP API (adds CORS, so any domain can fetch OTPs)
 app.get('/api/otps', async (req, res) => {
-  try {
-    const limit = req.query.limit || 100;
-    const response = await axios.get('https://dtz-tools.xo.je/sms-api.php', {
-      params: { limit },
-      timeout: 10000
-    });
-    // Forward the JSON exactly as received
-    res.json(response.data);
-  } catch (error) {
-    console.error('OTP proxy error:', error.message);
-    res.status(502).json({ success: false, error: 'Failed to fetch OTPs from upstream' });
+  const limit = parseInt(req.query.limit) || 100;
+  let allMessages = [];
+  for (const panel of PANELS) {
+    const msgs = await fetchPanelMessages(panel, limit);
+    allMessages.push(...msgs);
   }
+  allMessages.sort((a, b) => new Date(b.time) - new Date(a.time));
+  allMessages = allMessages.slice(0, limit);
+  res.json({
+    success: true,
+    count: allMessages.length,
+    messages: allMessages,
+    branding: {
+      channel: 'https://whatsapp.com/channel/0029VbCgB63LCoX5aiV5qp1t',
+      copyright: '© Dark Tech Zone — Advanced Security Division'
+    }
+  });
 });
 
-// ========== ADMIN ENDPOINTS (require API key in header or query) ==========
+// ========== ADMIN ENDPOINTS ==========
 function adminAuth(req, res, next) {
   const key = req.headers['x-api-key'] || req.query.key;
-  if (key !== ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: 'Invalid or missing API key' });
-  }
+  if (key !== ADMIN_KEY) return res.status(401).json({ success: false, error: 'Invalid API key' });
   next();
 }
 
-// Add numbers (POST body: { country, numbers: ["+123...", ...] })
 app.post('/api/admin/numbers', adminAuth, (req, res) => {
   const { country, numbers } = req.body;
-  if (!country || !numbers || !Array.isArray(numbers) || numbers.length === 0) {
+  if (!country || !numbers || !Array.isArray(numbers) || !numbers.length) {
     return res.status(400).json({ success: false, error: 'Missing country or numbers array' });
   }
   const stmt = db.prepare("INSERT OR IGNORE INTO numbers (country, phone) VALUES (?, ?)");
   let added = 0;
   numbers.forEach(phone => {
-    stmt.run([country.toUpperCase(), phone], function(err) {
-      if (!err && this.changes > 0) added++;
-    });
+    stmt.run([country.toUpperCase(), phone], function(err) { if (!err && this.changes > 0) added++; });
   });
   stmt.finalize(err => {
     if (err) return res.status(500).json({ success: false, error: err.message });
-    res.json({ success: true, added: added, total: numbers.length });
+    res.json({ success: true, added, total: numbers.length });
   });
 });
 
-// Delete all numbers of a country
 app.delete('/api/admin/country/:country', adminAuth, (req, res) => {
   const country = req.params.country.toUpperCase();
   db.run("DELETE FROM numbers WHERE country = ?", [country], function(err) {
@@ -120,7 +163,6 @@ app.delete('/api/admin/country/:country', adminAuth, (req, res) => {
   });
 });
 
-// Delete a single number by exact phone
 app.delete('/api/admin/number', adminAuth, (req, res) => {
   const phone = req.body.phone;
   if (!phone) return res.status(400).json({ success: false, error: 'Missing phone' });
@@ -130,50 +172,70 @@ app.delete('/api/admin/number', adminAuth, (req, res) => {
   });
 });
 
-// ========== Root endpoint with instructions ==========
+// Root page with instructions
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
-    <head><title>Dark Tech Zone – Virtual Numbers API</title><style>body{background:#0a0c10;color:#fff;font-family:monospace;padding:2rem;}</style></head>
+    <head><title>Dark Tech Zone API</title><style>body{background:#0a0c10;color:#fff;font-family:monospace;padding:2rem;}</style></head>
     <body>
       <h1>🔐 Dark Tech Zone Virtual Numbers API</h1>
-      <p>✅ API is running. Base URL: <code>${req.protocol}://${req.get('host')}</code></p>
-      <h2>📡 Public Endpoints (No API key)</h2>
+      <p>✅ Running at <code>${req.protocol}://${req.get('host')}</code></p>
+      <h2>Public Endpoints</h2>
       <ul>
-        <li><code>GET /api/countries</code> – list countries with number counts</li>
-        <li><code>GET /api/number?country=US&limit=1</code> – get random number(s)</li>
-        <li><code>GET /api/otps?limit=50</code> – proxy to OTP API (real‑time SMS)</li>
+        <li><code>GET /api/countries</code></li>
+        <li><code>GET /api/number?country=US&limit=1</code></li>
+        <li><code>GET /api/otps?limit=50</code> (real OTPs from KONEK+ST)</li>
       </ul>
-      <h2>🔑 Admin Endpoints (API key required)</h2>
-      <p>Use header <code>x-api-key: DarkZone2025</code> or query param <code>?key=DarkZone2025</code></p>
+      <h2>Admin (API key: DarkZone2025)</h2>
+      <p>Use header <code>x-api-key: DarkZone2025</code></p>
       <ul>
-        <li><code>POST /api/admin/numbers</code> – add numbers (body: { "country": "US", "numbers": ["+12025550123"] })</li>
-        <li><code>DELETE /api/admin/country/:country</code> – delete all numbers of a country</li>
-        <li><code>DELETE /api/admin/number</code> – delete a single number (body: { "phone": "+12025550123" })</li>
+        <li><code>POST /api/admin/numbers</code> – add numbers</li>
+        <li><code>DELETE /api/admin/country/:country</code></li>
+        <li><code>DELETE /api/admin/number</code></li>
       </ul>
-      <h2>🧪 Test with cURL</h2>
-      <pre>
-# Add numbers
-curl -X POST https://your-app.up.railway.app/api/admin/numbers \\
-  -H "x-api-key: DarkZone2025" \\
-  -H "Content-Type: application/json" \\
-  -d '{"country":"US","numbers":["+12025550123","+12025550124"]}'
-
-# Get a random US number
-curl https://your-app.up.railway.app/api/number?country=US
-
-# Get OTPs
-curl https://your-app.up.railway.app/api/otps?limit=10
-      </pre>
+      <p><a href="/admin.html">📁 Open Admin Panel to add numbers</a></p>
       <p>© Dark Tech Zone — Advanced Security Division | <a href="https://whatsapp.com/channel/0029VbCgB63LCoX5aiV5qp1t" style="color:#00ff99;">Join WhatsApp</a></p>
     </body>
     </html>
   `);
 });
 
-// Start server
+// Simple admin HTML page to add numbers (served by the API itself)
+app.get('/admin.html', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Add Numbers to API</title><style>body{background:#0a0c10;color:#fff;font-family:sans-serif;padding:2rem;}</style></head>
+    <body>
+      <h2>➕ Add Virtual Numbers</h2>
+      <input type="text" id="apiBase" value="${req.protocol}://${req.get('host')}" size="50" readonly><br><br>
+      <input type="text" id="country" placeholder="Country code (e.g., US, PK, IN)" style="width:200px;"><br>
+      <textarea id="numbers" rows="10" cols="50" placeholder="One phone number per line (with or without +)"></textarea><br>
+      <button onclick="addNumbers()">Add Numbers</button>
+      <pre id="result"></pre>
+      <script>
+        async function addNumbers() {
+          const apiBase = document.getElementById('apiBase').value;
+          const country = document.getElementById('country').value;
+          const numbersText = document.getElementById('numbers').value;
+          const numbers = numbersText.split('\\n').map(l=>l.trim()).filter(l=>l);
+          if (!country || numbers.length===0) return alert('Fill country and numbers');
+          const res = await fetch(apiBase + '/api/admin/numbers', {
+            method: 'POST',
+            headers: { 'Content-Type':'application/json', 'x-api-key':'DarkZone2025' },
+            body: JSON.stringify({ country, numbers })
+          });
+          const data = await res.json();
+          document.getElementById('result').innerText = JSON.stringify(data, null, 2);
+        }
+      </script>
+    </body>
+    </html>
+  `);
+});
+
 app.listen(PORT, () => {
-  console.log(`🚀 Dark Tech Zone API running on port ${PORT}`);
-  console.log(`🔗 WhatsApp channel: https://whatsapp.com/channel/0029VbCgB63LCoX5aiV5qp1t`);
+  console.log(`🚀 API running on port ${PORT}`);
+  console.log(`🔗 WhatsApp: https://whatsapp.com/channel/0029VbCgB63LCoX5aiV5qp1t`);
 });
